@@ -1,0 +1,160 @@
+name: Destroy Infra (Terraform)
+
+on:
+  issues:
+    types: [opened]
+
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: "Digite 'SIM' para confirmar a destruição da infraestrutura"
+        required: true
+        type: string
+
+jobs:
+  destroy:
+    # Executa se for chamado manualmente (workflow_dispatch)
+    # OU se a issue aberta tiver o título correto
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' &&
+       startsWith(github.event.issue.title, 'Destruir Infraestrutura'))
+
+    runs-on: ubuntu-latest
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      # -----------------------------
+      # 1️⃣ Checkout
+      # -----------------------------
+      - name: Checkout system-factory
+        uses: actions/checkout@v3
+
+      # -----------------------------
+      # 2️⃣ Instalar GitHub CLI e baixar artifacts do último provisionamento
+      # -----------------------------
+      - name: Baixar artifacts da última execução
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PAT }}
+        run: |
+          echo "📦 Instalando GitHub CLI..."
+          sudo apt-get update -y
+          sudo apt-get install -y gh jq
+
+          echo "📁 Criando estrutura de pastas..."
+          mkdir -p ./infra/terraform/azure
+
+          echo "🔍 Buscando último workflow 'infra-provision.yml' com sucesso..."
+          RUN_ID=$(gh run list --repo ${{ github.repository }} \
+            --workflow "infra-provision.yml" \
+            --json databaseId,status,conclusion,createdAt \
+            --jq '.[] | select(.conclusion=="success") | .databaseId' \
+            | head -n 1)
+
+          if [ -z "$RUN_ID" ]; then
+            echo "❌ Nenhum workflow bem-sucedido encontrado."
+            exit 1
+          fi
+
+          echo "📦 Último run ID encontrado: $RUN_ID"
+          gh run download "$RUN_ID" --repo ${{ github.repository }} \
+            --name terraform-state --dir ./infra/terraform/azure/
+          gh run download "$RUN_ID" --repo ${{ github.repository }} \
+            --name ssh-public --dir ./infra/terraform/azure/
+          gh run download "$RUN_ID" --repo ${{ github.repository }} \
+            --name ssh-private --dir ./infra/terraform/azure/
+          echo "✅ Artifacts baixados com sucesso!"
+          ls -alh ./infra/terraform/azure || true
+
+      # -----------------------------
+      # 3️⃣ Setup Terraform
+      # -----------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      - name: Inicializar Terraform
+        working-directory: ./infra/terraform/azure
+        run: terraform init -input=false
+
+      - name: Validar Terraform
+        working-directory: ./infra/terraform/azure
+        run: terraform validate
+
+      # -----------------------------
+      # 4️⃣ Destruir Infraestrutura
+      # -----------------------------
+      - name: Terraform Destroy
+        id: destroy
+        run: |
+          echo "⚠️ Iniciando destruição da infraestrutura..."
+          PUB_PATH=$(find ./infra/terraform/azure -type f -name "*.pub" | head -n 1)
+          if [ -z "$PUB_PATH" ]; then
+            echo "❌ Nenhuma chave pública encontrada!"
+            ls -R ./infra/terraform/azure || true
+            exit 1
+          fi
+
+          echo "🔑 Usando chave pública: $PUB_PATH"
+          export TF_VAR_ssh_public_key="$(cat "$PUB_PATH")"
+
+          cd ./infra/terraform/azure
+          set +e
+          terraform destroy -auto-approve -input=false
+          DESTROY_EXIT_CODE=$?
+          set -e
+
+          if [ $DESTROY_EXIT_CODE -eq 0 ]; then
+            echo "✅ Infraestrutura destruída com sucesso." | tee destroy_result.txt
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Falha na destruição da infraestrutura." | tee destroy_result.txt
+            echo "status=failure" >> $GITHUB_OUTPUT
+          fi
+
+      # -----------------------------
+      # 5️⃣ Fechar issue automaticamente (com sucesso ou falha)
+      # -----------------------------
+      - name: Fechar issue de destruição
+        if: github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PAT }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          STATUS: ${{ steps.destroy.outputs.status }}
+        run: |
+          echo "📫 Atualizando issue #${ISSUE_NUMBER} (${STATUS})..."
+          if [ "$STATUS" == "success" ]; then
+            gh issue close "$ISSUE_NUMBER" --repo "$REPO" \
+              --comment "💣 Infraestrutura destruída com sucesso! Workflow finalizado automaticamente."
+          else
+            gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+              --body "❌ Ocorreu uma falha durante a destruição da infraestrutura. Verifique os logs do workflow para detalhes."
+          fi
+
+      # -----------------------------
+      #  Desativar SHOULD_DEPLOY = false NO MESMO REPOSITÓRIO
+      # -----------------------------
+      - name: Desativar SHOULD_DEPLOY neste repositório
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PAT }}
+        run: |
+          echo "🔧 Desativando SHOULD_DEPLOY=true no repositório atual..."
+          gh secret set SHOULD_DEPLOY --body "false"
+          echo "✅ SHOULD_DEPLOY desativando neste repositório!"
+
+      # -----------------------------
+      # 6️⃣ Limpeza
+      # -----------------------------
+      - name: Limpar arquivos temporários
+        if: always()
+        run: |
+          rm -f ./infra/terraform/azure/sysfac_vm_id_rsa*
+          echo "🧹 Chaves SSH removidas do runner."

@@ -1,0 +1,26 @@
+services:
+  watchtower:
+    image: ghcr.io/containrrr/watchtower:1.7.1
+    container_name: watchtower
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      TZ: "America/Recife"
+      DOCKER_API_VERSION: "1.44"
+      WATCHTOWER_LABEL_ENABLE: "true"
+      WATCHTOWER_CLEANUP: "true"
+
+    ports:
+      - "8080:8080"
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    command:
+      - "--label-enable"
+      - "--cleanup"
+      - "--http-api-update"
+      - "--http-api-token=${WT_API_TOKEN}"

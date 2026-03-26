@@ -1,0 +1,39 @@
+name: "Destruir Infraestrutura"
+description: "Remove toda a infraestrutura provisionada para este repositório."
+title: "Destruir Infraestrutura do Projeto"
+labels: ["infra", "destroy"]
+assignees:
+  - "@devops-team"
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ⚠️ Destruição de Infraestrutura
+
+        Esta issue remove a infraestrutura criada via Terraform e Ansible para este repositório.
+
+        > ⚠️ **Atenção:** esta ação é irreversível. Todos os recursos (VM, storage, IPs, etc.) serão permanentemente excluídos.
+
+  - type: input
+    id: repo_name
+    attributes:
+      label: "🧩 Nome do repositório"
+      description: "Informe o nome exato do repositório que deseja destruir a infra."
+      placeholder: "ex: sysfac-webapp"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reason
+    attributes:
+      label: "💬 Motivo da destruição"
+      description: "Explique o motivo pelo qual a infraestrutura será destruída (ex: fim do projeto, reconfiguração, etc.)"
+      placeholder: "Exemplo: Encerramento do ambiente de testes."
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        🧱 Após abrir esta issue, o pipeline **Destroy Infra (Terraform + Ansible)** será disparado automaticamente.

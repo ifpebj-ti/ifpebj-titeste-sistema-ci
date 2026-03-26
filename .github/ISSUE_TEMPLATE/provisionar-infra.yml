@@ -1,0 +1,95 @@
+name: "Provisionar Infraestrutura (Terraform + Ansible)"
+description: "Cria uma nova infraestrutura de desenvolvimento baseada em Terraform e Ansible."
+title: "Provisionar Infraestrutura para o Projeto"
+labels: ["infra", "provision"]
+assignees:
+  - "@devops-team"
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## ⚙️ Provisionamento de Infraestrutura
+
+        Esta issue inicializa a criação automática da infraestrutura associada a este repositório, incluindo a máquina virtual no Azure e a configuração via Ansible.
+
+        > ⚠️ **Antes de abrir esta issue, configure suas credenciais no repositório!**
+
+        Siga as etapas abaixo para gerar e armazenar suas credenciais Azure como secrets.
+
+  - type: markdown
+    attributes:
+      value: |
+        ### 🪪 Gerando as credenciais no Azure
+
+        **1️⃣ Instale o Azure CLI (caso ainda não tenha instalado)**  
+        👉 [Baixar e instalar o Azure CLI (Windows)](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli-windows?view=azure-cli-latest&pivots=winget)  
+        *(Siga as instruções oficiais da Microsoft para Windows. Para Linux e macOS, veja o menu lateral da documentação.)*
+        
+
+        **2️⃣ Autentique-se no Azure CLI**
+        *Use o CMD pra rodar os comandos*
+        ```bash
+        az login
+        ```
+
+        **3️⃣ Liste suas assinaturas**
+        ```bash
+        az account list --output table
+        ```
+
+        **4️⃣ Selecione a assinatura desejada**
+        ```bash
+        az account set --subscription "<SUBSCRIPTION_ID>"
+        ```
+
+        **5️⃣ Crie o Service Principal**
+        ```bash
+        az ad sp create-for-rbac --role="Contributor" --scopes="/subscriptions/<SUBSCRIPTION_ID>"
+        ```
+
+        Exemplo de saída:
+        ```json
+        {
+          "appId": "xxxxxx-xxx-xxxx-xxxx-xxxxxxxxxx",
+          "displayName": "azure-cli-2025-xxxx",
+          "password": "xxxxxx~xxxxxx~xxxxx",
+          "tenant": "xxxxx-xxxx-xxxxx-xxxx-xxxxx"
+        }
+        ```
+
+        **6️⃣ Adicione os valores como Secrets em:**
+        `Settings → Secrets and variables → Actions → New repository secret`
+
+        | Nome do Secret          | Valor do Azure CLI             |
+        |--------------------------|--------------------------------|
+        | `ARM_CLIENT_ID`          | appId                         |
+        | `ARM_CLIENT_SECRET`      | password                      |
+        | `ARM_SUBSCRIPTION_ID`    | subscriptionId                 |
+        | `ARM_TENANT_ID`          | tenant                        |
+        | `GHCR_USER`              | Seu usuário GitHub             |
+
+        Após criar todos os secrets, siga com os próximos campos.
+
+  - type: input
+    id: repo_name
+    attributes:
+      label: "🧩 Nome do repositório"
+      description: "Informe o nome exato do repositório (ex: projeto-api-logistica)"
+      placeholder: "ex: sysfac-webapp"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: "📄 Contexto do Projeto"
+      description: "Descreva brevemente o objetivo ou ambiente da infraestrutura que será provisionada."
+      placeholder: "Exemplo: Infra para ambiente de homologação da API de logística."
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        🔁 Assim que esta issue for aberta, o pipeline **Provision Infra (Terraform + Ansible)** será disparado automaticamente.

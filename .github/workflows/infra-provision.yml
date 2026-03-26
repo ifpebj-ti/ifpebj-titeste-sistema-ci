@@ -1,0 +1,189 @@
+name: Provision Infra (Terraform + Ansible)
+
+on:
+  issues:
+    types: [opened]
+
+  workflow_dispatch:
+    inputs:
+      repo_name:
+        description: "Nome do repositório que solicitou a criação da infra"
+        required: true
+        type: string
+
+jobs:
+  provision:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' &&
+       startsWith(github.event.issue.title, 'Provisionar Infraestrutura'))
+
+    runs-on: ubuntu-latest
+
+    env:
+      ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+      ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+      ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+      TF_IN_AUTOMATION: "true"
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+
+    steps:
+      # -----------------------------
+      # 1️⃣ Checkout
+      # -----------------------------
+      - name: Checkout system-factory
+        uses: actions/checkout@v3
+
+      # -----------------------------
+      # 2️⃣ Gerar chave SSH temporária
+      # -----------------------------
+      - name: Gerar chave SSH temporária
+        id: sshkey
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keygen -t rsa -b 4096 -f ~/.ssh/sysfac_vm_id_rsa -q -N ""
+          echo "public_key<<EOF" >> $GITHUB_OUTPUT
+          cat ~/.ssh/sysfac_vm_id_rsa.pub >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # -----------------------------
+      # 3️⃣ Setup Terraform
+      # -----------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.5
+
+      - name: Inicializar Terraform
+        working-directory: ./infra/terraform/azure
+        run: terraform init -input=false
+
+      - name: Validar Terraform
+        working-directory: ./infra/terraform/azure
+        run: terraform validate
+
+      # -----------------------------
+      # 4️⃣ Aplicar Terraform (criar infra)
+      # -----------------------------
+      - name: Aplicar Terraform (criar infra)
+        id: terraform
+        working-directory: ./infra/terraform/azure
+        env:
+          TF_VAR_ssh_public_key: ${{ steps.sshkey.outputs.public_key }}
+        run: |
+          terraform apply -auto-approve -input=false
+          echo "vm_ip=$(terraform output -raw public_ip)" >> $GITHUB_OUTPUT
+
+      # -----------------------------
+      # 5️⃣ Salvar estado Terraform e chaves SSH como artifacts
+      # -----------------------------
+      - name: Salvar estado Terraform
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-state
+          path: ./infra/terraform/azure/terraform.tfstate
+
+      - name: Salvar chave SSH pública
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-public
+          path: ~/.ssh/sysfac_vm_id_rsa.pub
+
+      - name: Salvar chave SSH privada
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-private
+          path: ~/.ssh/sysfac_vm_id_rsa
+
+      # -----------------------------
+      # 6️⃣ Setup Ansible
+      # -----------------------------
+      - name: Instalar dependências Ansible
+        run: |
+          sudo apt update -y
+          sudo apt install -y ansible python3-apt sshpass
+
+      - name: Preparar chave SSH
+        run: |
+          chmod 600 ~/.ssh/sysfac_vm_id_rsa
+
+      # -----------------------------
+      # 7️⃣ Criar vault.yml dinâmico
+      # -----------------------------
+      - name: Criar vault.yml dinâmico
+        working-directory: ./infra/terraform/azure/ansible
+        run: |
+          cat > vault.yml <<EOF
+          github_user: "${{ secrets.GHCR_USER }}"
+          github_pat: "${{ secrets.GHCR_PAT }}"
+          ghcr_user: "${{ secrets.GHCR_USER }}"
+          ghcr_pat: "${{ secrets.GHCR_PAT }}"
+          EOF
+
+      # -----------------------------
+      # 8️⃣ Executar playbook Ansible
+      # -----------------------------
+      - name: Rodar playbook Ansible (site.yml)
+        working-directory: ./infra/terraform/azure/ansible
+        run: |
+          ansible-playbook -i "${{ steps.terraform.outputs.vm_ip }}," \
+            --private-key ~/.ssh/sysfac_vm_id_rsa \
+            -u azureuser site.yml
+
+      - name: Copiar informações do Watchtower do servidor
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/sysfac_vm_id_rsa \
+            azureuser@${{ steps.terraform.outputs.vm_ip }}:/tmp/watchtower_info.txt \
+            ./watchtower_info.txt
+
+      - name: Upload do arquivo de informações do Watchtower
+        uses: actions/upload-artifact@v4
+        with:
+          name: watchtower-info
+          path: ./watchtower_info.txt
+
+      - name: Ler dados e criar secrets
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PAT }}  # precisa ter permissão repo+admin:repo_hook
+        run: |
+          ENDPOINT=$(grep ENDPOINT watchtower_info.txt | cut -d '=' -f2)
+          TOKEN=$(grep TOKEN watchtower_info.txt | cut -d '=' -f2)
+
+          gh secret set WATCHTOWER_ENDPOINT --body "$ENDPOINT"
+          gh secret set WATCHTOWER_TOKEN --body "$TOKEN"
+
+      # -----------------------------
+      # 9️⃣ Salvar IP público
+      # -----------------------------
+      - name: Salvar IP público como artifact
+        run: echo "${{ steps.terraform.outputs.vm_ip }}" > vm_ip.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm-ip
+          path: vm_ip.txt
+
+      # -----------------------------
+      #  🔟 Ativar SHOULD_DEPLOY = true NO MESMO REPOSITÓRIO
+      # -----------------------------
+      - name: Ativar SHOULD_DEPLOY neste repositório
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PAT }}
+        run: |
+          echo "🔧 Ativando SHOULD_DEPLOY=true no repositório atual..."
+          gh secret set SHOULD_DEPLOY --body "true"
+          echo "✅ SHOULD_DEPLOY ativado neste repositório!"
+
+      # -----------------------------
+      # 🔟 Fechar issue original
+      # -----------------------------
+      - name: Fechar issue de provisionamento
+        if: github.event_name == 'issues'
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PAT }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh issue close "$ISSUE_NUMBER" --repo "$REPO" \
+            --comment "✅ Infraestrutura provisionada com sucesso! IP: ${{ steps.terraform.outputs.vm_ip }}"

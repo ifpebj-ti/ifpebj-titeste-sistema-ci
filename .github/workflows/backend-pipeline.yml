@@ -1,0 +1,205 @@
+name: backend-pipeline
+
+on:
+  pull_request:
+    types: [closed]
+    branches: ["main"]
+    paths:
+      - 'back/**'
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: back-${{ github.event.repository.name }}
+  REGISTRY: ghcr.io
+
+jobs:
+
+  # =====================================================
+  # PREPARAR TAG 
+  # =====================================================
+  prepare-tag:
+    name: Preparar nova tag
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.nova_tag.outputs.nova_tag }}
+      tipo: ${{ steps.tipo.outputs.tipo }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Instalar GitHub CLI
+        run: sudo apt-get install -y gh
+
+      - name: Extrair tipo de mudança da PR
+        id: tipo
+        run: |
+          echo "${{ github.event.pull_request.body }}" > body.txt
+          tipo=""
+          if grep -q "\[x\] marco-no-projeto" body.txt; then
+            tipo="marco-no-projeto"
+          elif grep -q "\[x\] nova-feature" body.txt; then
+            tipo="nova-feature"
+          elif grep -q "\[x\] bug-fix" body.txt; then
+            tipo="bug-fix"
+          else
+            echo "Nenhuma opção marcada corretamente em 'tipo:'"
+          fi
+          echo "tipo=$tipo" >> "$GITHUB_OUTPUT"
+
+      - name: Obter a última tag da release
+        id: ultima
+        run: |
+          gh auth setup-git
+          tag=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          if [[ -z "$tag" ]]; then tag="0.0.0"; fi
+          echo "tag_atual=$tag" >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calcular nova tag
+        id: nova_tag
+        run: |
+          IFS='.' read -r major minor patch <<< "${{ steps.ultima.outputs.tag_atual }}"
+          case "${{ steps.tipo.outputs.tipo }}" in
+            bug-fix) patch=$((patch + 1));;
+            nova-feature) minor=$((minor + 1)); patch=0;;
+            marco-no-projeto) major=$((major + 1)); minor=0; patch=0;;
+          esac
+          nova_tag="${major}.${minor}.${patch}"
+          echo "nova_tag=$nova_tag" >> "$GITHUB_OUTPUT"
+
+
+  # =====================================================
+  # BUILD + SCAN + PUSH
+  # =====================================================
+  docker-build:
+    name: Build and Push Docker
+    runs-on: ubuntu-latest
+    needs: prepare-tag
+    env:
+      TAG: ${{ needs.prepare-tag.outputs.new_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Injetar label de source no Dockerfile
+        run: echo "LABEL org.opencontainers.image.source=https://github.com/${{ github.repository }}" >> back/Dockerfile
+
+      - name: Login no GHCR
+        run: echo "${{ secrets.GHCR_PAT }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: 1.1 Build Docker image
+        run: |
+          docker build ./back \
+            -f back/Dockerfile \
+            -t $REGISTRY/${{ github.repository_owner }}/$IMAGE_NAME:${TAG} \
+            -t $REGISTRY/${{ github.repository_owner }}/$IMAGE_NAME:latest \
+            --build-arg REPO_URL="https://github.com/${{ github.repository }}"
+
+      - name: 1.2 Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ env.TAG }}
+          format: table
+          exit-code: 0
+          severity: CRITICAL,HIGH
+
+      - name: 1.3 Push Docker image (versão + latest)
+        run: |
+          docker push $REGISTRY/${{ github.repository_owner }}/$IMAGE_NAME:${TAG}
+          docker push $REGISTRY/${{ github.repository_owner }}/$IMAGE_NAME:latest
+
+
+  # =====================================================
+  # DEPLOY — MESMO PADRÃO DO FRONTEND (com GHCR auth)
+  # =====================================================
+  deploy:
+    name: Deploy Backend na VM
+    needs: docker-build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH (tudo no mesmo step)
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_PAT }}
+          DEPLOY_GHCR_USER: ${{ secrets.DEPLOY_GHCR_USER }}
+          DEPLOY_GHCR_PAT: ${{ secrets.DEPLOY_GHCR_PAT }}
+          SHOULD_DEPLOY: ${{ secrets.SHOULD_DEPLOY }}
+          
+        if: ${{ env.SHOULD_DEPLOY == 'true' }}
+          
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y gh jq openssh-client
+
+          echo "📥 Baixando artifacts da última infra..."
+          mkdir -p infra-data
+
+          RUN_ID=$(gh run list --repo ${{ github.repository }} \
+            --workflow "infra-provision.yml" \
+            --json databaseId,status,conclusion \
+            --jq '.[] | select(.conclusion=="success") | .databaseId' \
+          | head -n 1)
+
+          echo "RUN_ID: $RUN_ID"
+          gh run download "$RUN_ID" --repo ${{ github.repository }} --dir infra-data
+
+          echo "======= ARQUIVOS ======="
+          ls -R infra-data
+          echo "========================="
+
+          echo "🔍 Extraindo IP"
+          IP_FILE=$(find infra-data -type f -path "*/vm-ip/*" | head -n 1)
+          VM_IP=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' "$IP_FILE")
+          echo "VM_IP: $VM_IP"
+
+          echo "🔍 Extraindo chave SSH"
+          KEY=$(find infra-data -maxdepth 6 -type f \( -name "*_id_rsa" -o -name "id_rsa" -o -name "*.pem" \) | head -n 1)
+          cp "$KEY" /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          echo "🚀 Conectando via SSH..."
+          ssh -o StrictHostKeyChecking=no -i /tmp/deploy_key azureuser@$VM_IP bash << EOF
+            echo "🔐 Login GHCR..."
+            echo "${DEPLOY_GHCR_PAT}" | docker login ghcr.io -u "${DEPLOY_GHCR_USER}" --password-stdin
+
+            cd /opt/sysfac/compose
+
+            echo "📦 Pull (backend)"
+            docker compose pull back-app
+
+            echo "🚀 Up (backend)"
+            docker compose up -d back-app
+
+            echo "🧹 Clean"
+            docker image prune -af
+          EOF
+
+
+  # =====================================================
+  # RELEASE
+  # =====================================================
+  create-release:
+    name: Criar release
+    runs-on: ubuntu-latest
+    needs: [docker-build, prepare-tag]
+
+    env:
+      NEW_TAG: ${{ needs.prepare-tag.outputs.new_tag }}
+      TIPO: ${{ needs.prepare-tag.outputs.tipo }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publicar release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ env.NEW_TAG }}
+          name: Release ${{ env.NEW_TAG }}
+          generate_release_notes: true
+          body: |
+            Backend atualizado e deploy aplicado com sucesso.
+            Tipo de mudança: ${{ env.TIPO }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GHCR_PAT }}
