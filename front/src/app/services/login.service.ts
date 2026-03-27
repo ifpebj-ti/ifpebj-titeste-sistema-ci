@@ -7,7 +7,7 @@ import { tap, catchError, throwError, Observable } from 'rxjs';
   providedIn: 'root'
 })
 export class LoginService {
-  private apiUrl = 'http://localhost:8000/api/auth/';
+  private apiUrl = `http://${window.location.hostname}:8000/api/auth/`;
 
   constructor(private httpClient: HttpClient) { }
 
