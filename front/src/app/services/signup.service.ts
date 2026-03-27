@@ -7,7 +7,7 @@ import { catchError } from 'rxjs/operators';
   providedIn: 'root'
 })
 export class SignupService {
-  private apiUrl = 'http://localhost:8000/api/users/saveUser';
+  private apiUrl = `http://${window.location.hostname}:8000/api/users/saveUser`;
 
   constructor(private httpClient: HttpClient) {}
 
