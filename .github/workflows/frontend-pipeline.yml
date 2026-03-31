@@ -32,8 +32,10 @@ jobs:
 
       - name: Extrair tipo de mudança
         id: tipo
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          echo "${{ github.event.pull_request.body }}" > body.txt
+          printf '%s' "$PR_BODY" > body.txt
 
           tipo=""
           if grep -q "\[x\] marco-no-projeto" body.txt; then tipo="marco-no-projeto"
